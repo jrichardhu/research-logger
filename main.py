@@ -166,9 +166,9 @@ def main():
                     research_log.generate_weekly_digest()
 
                 elif choice == "8":
-                    days = get_cancellable_number("Enter days threshold (default 30)", allow_empty=True)
+                    days = get_cancellable_number("Enter days threshold (default 10)", allow_empty=True)
                     if days is None:
-                        days = 30
+                        days = 10
                     research_log.get_stale_ideas(days)
 
                 elif choice == "9":
