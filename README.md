@@ -94,7 +94,7 @@ Begin each day by setting clear objectives:
 Review current goals:
 - Update progress of individual goals
 - View goal summary
-- Check status of unfinished goals
+- Check status of incomplete goals
 
 ### 3. Add Research Idea (Option 3)
 Capture new research directions:
@@ -138,7 +138,7 @@ Create a summary of research progress:
 ### 8. Check Stale Ideas (Option 4)
 Review and update older research threads:
 ```python
-> Enter days threshold (default 30): 14
+> Enter days threshold (default 10): 14
 ```
 
 ### 9. Conclude Experiment (Option 8)
