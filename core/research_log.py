@@ -145,11 +145,69 @@ class ComprehensiveResearchLog:
             'goal_status': {}  # Tracks status of each goal
         }
 
+    def _get_past_incomplete_goals(self) -> List[Dict[str, Any]]:
+        """
+        Retrieves incomplete goals from past daily logs.
+        Returns a list of dictionaries containing goal details and their original dates.
+        """
+        incomplete_goals = []
+        daily_logs_path = self.base_path / 'daily_logs'
+        today = datetime.now().date()
+        
+        # Iterate through daily log files
+        for log_file in daily_logs_path.glob('daily_*.json'):
+            # Extract date from filename (daily_YYYYMMDD.json)
+            try:
+                file_date = datetime.strptime(log_file.stem[6:], '%Y%m%d').date()
+                if file_date >= today:
+                    continue
+                    
+                daily_summary = load_json(log_file)
+                goals = daily_summary.get('goals', [])
+                goal_status = daily_summary.get('goal_status', {})
+                
+                # Check each goal's status
+                for i, goal in enumerate(goals, 1):
+                    status = goal_status.get(str(i), {}).get('status', 'pending')
+                    if status != 'completed':
+                        incomplete_goals.append({
+                            'goal': goal,
+                            'original_date': file_date.isoformat(),
+                            'status': status,
+                            'progress_notes': goal_status.get(str(i), {}).get('progress_notes', [])
+                        })
+            except (ValueError, json.JSONDecodeError) as e:
+                console.log(f"[yellow]Warning: Error processing {log_file}: {str(e)}[/yellow]")
+        
+        return incomplete_goals
+
     def review_daily_goals(self) -> None:
-        """Review and update the status of today's goals."""
+        """Review and update the status of today's goals, including incomplete goals from past days."""
         daily_summary = self._load_daily_goals()
         goals = daily_summary.get('goals', [])
         goal_status = daily_summary.get('goal_status', {})
+        
+        # Get incomplete goals from past days
+        past_incomplete = self._get_past_incomplete_goals()
+        
+        if past_incomplete:
+            console.display_header("Past Incomplete Goals")
+            for i, incomplete in enumerate(past_incomplete):
+                console.info(f"Goal from {incomplete['original_date']}: {incomplete['goal']}")
+                if console.confirm("Add this goal to today's goals?"):
+                    # Add the goal to today's list
+                    goals.append(incomplete['goal'])
+                    new_goal_index = len(goals)
+                    
+                    # Transfer the previous status and progress notes
+                    goal_status[str(new_goal_index)] = {
+                        'status': incomplete['status'],
+                        'progress_notes': incomplete['progress_notes'] + [{
+                            'time': datetime.now().isoformat(),
+                            'note': f"Carried over from {incomplete['original_date']}"
+                        }],
+                        'completion_time': None
+                    }
         
         if not goals:
             console.warning("No goals set for today. Would you like to set some goals now?")
@@ -160,6 +218,7 @@ class ComprehensiveResearchLog:
 
         console.display_header("Daily Goals Review")
         
+        # Review all goals (both new and carried over)
         for i, goal in enumerate(goals, 1):
             current_status = goal_status.get(str(i), {
                 'status': 'pending',
@@ -168,12 +227,20 @@ class ComprehensiveResearchLog:
             })
             
             console.info(f"\nGoal {i}: {goal}")
+            
+            # Display if this is a carried-over goal
+            for note in current_status['progress_notes']:
+                if 'Carried over from' in note['note']:
+                    console.info(f"[yellow]This goal was carried over from {note['note'].split('from ')[-1]}[/yellow]")
+                    break
+            
             console.info(f"Current Status: {current_status['status']}")
             
             if current_status['progress_notes']:
                 console.info("Progress Notes:")
                 for note in current_status['progress_notes']:
-                    console.log(f"- {note['time']}: {note['note']}")
+                    if 'Carried over from' not in note['note']:
+                        console.log(f"- {note['time']}: {note['note']}")
             
             update = console.confirm("Update this goal?")
             if update:
@@ -197,13 +264,16 @@ class ComprehensiveResearchLog:
                 
                 goal_status[str(i)] = current_status
         
-        # Update the daily summary with new status
+        # Update daily summary with modified goals and status
+        daily_summary['goals'] = goals
         daily_summary['goal_status'] = goal_status
-        save_json(daily_summary, self.base_path / 'daily_logs' / f"daily_{datetime.now():%Y%m%d}.json")
+        save_json(
+            daily_summary, 
+            self.base_path / 'daily_logs' / f"daily_{datetime.now():%Y%m%d}.json"
+        )
         
-        # Show summary
         self._display_goals_summary(daily_summary)
-    
+
     def _display_goals_summary(self, daily_summary: Dict[str, Any]) -> None:
         """Display a summary of goals and their progress."""
         goals = daily_summary.get('goals', [])
@@ -241,7 +311,7 @@ class ComprehensiveResearchLog:
                 latest_time
             )
         
-        console.console.print(table)
+        console.log(table)
         
         # Show completion statistics
         completed = sum(1 for s in goal_status.values() if s['status'] == 'completed')
@@ -249,22 +319,97 @@ class ComprehensiveResearchLog:
         completion_rate = (completed / total * 100) if total > 0 else 0
         
         console.info(f"\nProgress: {completed}/{total} goals completed ({completion_rate:.1f}%)")
+
     def start_day(self, goals: List[str]) -> dict:
-        """Begin a new research day with specific goals"""
-        summary = {
-            'date': datetime.now(),
-            'goals': goals,
-            'completed_tasks': [],
-            'insights': [],
-            'next_day_todos': []
-        }
+        """
+        Begin a new research day with specific goals, preserving existing data if present.
+        
+        This method checks for an existing daily summary and merges new goals with any
+        existing data to maintain continuity throughout the day.
+        """
+        today = datetime.now()
+        daily_log_path = self.base_path / 'daily_logs' / f"daily_{today:%Y%m%d}.json"
+        
+        # If a daily summary exists, load it first
+        if daily_log_path.exists():
+            existing_summary = load_json(daily_log_path)
+            
+            # Preserve existing data while adding new goals
+            summary = {
+                'date': existing_summary.get('date', today.isoformat()),
+                'goals': list(set(existing_summary.get('goals', []) + goals)),
+                'completed_tasks': existing_summary.get('completed_tasks', []),
+                'insights': existing_summary.get('insights', []),
+                'next_day_todos': existing_summary.get('next_day_todos', []),
+                'goal_status': existing_summary.get('goal_status', {})
+            }
+            
+            # Initialize status for new goals
+            current_goal_count = len(existing_summary.get('goals', []))
+            for i, goal in enumerate(goals, current_goal_count + 1):
+                if str(i) not in summary['goal_status']:
+                    summary['goal_status'][str(i)] = {
+                        'status': 'pending',
+                        'progress_notes': [{
+                            'time': datetime.now().isoformat(),
+                            'note': 'Goal added during day'
+                        }],
+                        'completion_time': None
+                    }
+        else:
+            # Create new summary if no existing file
+            summary = {
+                'date': today.isoformat(),
+                'goals': goals,
+                'completed_tasks': [],
+                'insights': [],
+                'next_day_todos': [],
+                'goal_status': {
+                    str(i): {
+                        'status': 'pending',
+                        'progress_notes': [],
+                        'completion_time': None
+                    }
+                    for i, _ in enumerate(goals, 1)
+                }
+            }
+        
+        # Update in-memory state
         self.daily_summaries.append(summary)
         
-        # Display daily goals
-        console.log("\n[bold blue]Daily Research Goals:[/bold blue]")
-        for i, goal in enumerate(goals, 1):
-            console.log(f"{i}. {goal}")
+        # Display current goals with their status
+        console.display_header("Daily Research Goals")
+        table = Table(show_header=True, header_style="bold magenta")
+        table.add_column("Goal")
+        table.add_column("Status")
+        table.add_column("Added")
         
+        for i, goal in enumerate(summary['goals'], 1):
+            status = summary['goal_status'].get(str(i), {})
+            
+            # Determine when the goal was added
+            notes = status.get('progress_notes', [])
+            added_time = "Initial setup"
+            if notes and 'Goal added during day' in notes[0]['note']:
+                added_time = "Added later"
+                
+            status_text = status.get('status', 'pending')
+            status_style = {
+                'pending': 'yellow',
+                'in_progress': 'blue',
+                'completed': 'green',
+                'blocked': 'red'
+            }.get(status_text, 'white')
+            
+            table.add_row(
+                goal,
+                Text(status_text, style=status_style),
+                added_time
+            )
+        
+        console.log(table)
+        
+        # Save the updated summary
         self._save_daily_summary(summary)
         return summary
 
@@ -443,11 +588,44 @@ class ComprehensiveResearchLog:
         
         console.log("[green]Experiment concluded successfully[/green]")
 
-    def _save_daily_summary(self, summary: dict):
-        """Save daily summary to disk"""
-        summary_path = self.base_path / 'daily_logs' / f"daily_{summary['date']:%Y%m%d}.json"
-        with open(summary_path, 'w') as f:
-            json.dump(summary, f, indent=2, cls=DateTimeEncoder)
+    def _save_daily_summary(self, summary: Dict[str, Any]) -> None:
+        """
+        Save or update the daily summary file, preserving file consistency.
+        
+        This method ensures atomic writes to prevent data corruption and maintains
+        proper JSON formatting with datetime handling.
+        """
+        today = datetime.now()
+        daily_log_path = self.base_path / 'daily_logs' / f"daily_{today:%Y%m%d}.json"
+        
+        try:
+            # Create a temporary file for atomic write
+            temp_path = daily_log_path.with_suffix('.tmp')
+            
+            # Prepare the summary for serialization
+            serializable_summary = {
+                'date': summary['date'] if isinstance(summary['date'], str) 
+                       else summary['date'].isoformat(),
+                'goals': summary['goals'],
+                'completed_tasks': summary['completed_tasks'],
+                'insights': summary['insights'],
+                'next_day_todos': summary['next_day_todos'],
+                'goal_status': summary['goal_status']
+            }
+            
+            # Write to temporary file first
+            with open(temp_path, 'w') as f:
+                json.dump(serializable_summary, f, indent=2, cls=DateTimeEncoder)
+            
+            # Atomic rename to ensure file consistency
+            temp_path.replace(daily_log_path)
+            
+            console.log(f"[green]Successfully saved daily summary to {daily_log_path}[/green]")
+        except Exception as e:
+            console.log(f"[red]Error saving daily summary: {str(e)}[/red]")
+            if temp_path.exists():
+                temp_path.unlink()
+            raise
 
     def generate_weekly_digest(self) -> str:
         """Create a comprehensive weekly research summary"""
