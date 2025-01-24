@@ -147,16 +147,16 @@ class ComprehensiveResearchLog:
 
     def _get_past_incomplete_goals(self) -> List[Dict[str, Any]]:
         """
-        Retrieves incomplete goals from past daily logs.
-        Returns a list of dictionaries containing goal details and their original dates.
+        Retrieves incomplete goals from past daily logs, ensuring carried-over goals
+        are only counted once with their original date.
+        Returns a list of dictionaries containing unique goal details and their earliest dates.
         """
-        incomplete_goals = []
+        goal_tracker: Dict[str, Dict[str, Any]] = {}
         daily_logs_path = self.base_path / 'daily_logs'
         today = datetime.now().date()
         
-        # Iterate through daily log files
-        for log_file in daily_logs_path.glob('daily_*.json'):
-            # Extract date from filename (daily_YYYYMMDD.json)
+        # Iterate through daily log files in chronological order
+        for log_file in sorted(daily_logs_path.glob('daily_*.json')):
             try:
                 file_date = datetime.strptime(log_file.stem[6:], '%Y%m%d').date()
                 if file_date >= today:
@@ -168,18 +168,27 @@ class ComprehensiveResearchLog:
                 
                 # Check each goal's status
                 for i, goal in enumerate(goals, 1):
+                    goal_text = str(goal).strip()
                     status = goal_status.get(str(i), {}).get('status', 'pending')
+                    
                     if status != 'completed':
-                        incomplete_goals.append({
-                            'goal': goal,
-                            'original_date': file_date.isoformat(),
-                            'status': status,
-                            'progress_notes': goal_status.get(str(i), {}).get('progress_notes', [])
-                        })
+                        # Only update if this is an earlier occurrence or new goal
+                        if goal_text not in goal_tracker or \
+                           datetime.fromisoformat(goal_tracker[goal_text]['original_date']).date() > file_date:
+                            goal_tracker[goal_text] = {
+                                'goal': goal,
+                                'original_date': file_date.isoformat(),
+                                'status': status,
+                                'progress_notes': goal_status.get(str(i), {}).get('progress_notes', [])
+                            }
+                    elif status == 'completed' and goal_text in goal_tracker:
+                        # Remove goal if it was eventually completed
+                        del goal_tracker[goal_text]
+                        
             except (ValueError, json.JSONDecodeError) as e:
                 console.log(f"[yellow]Warning: Error processing {log_file}: {str(e)}[/yellow]")
         
-        return incomplete_goals
+        return list(goal_tracker.values())
 
     def review_daily_goals(self) -> None:
         """Review and update the status of today's goals, including incomplete goals from past days."""
