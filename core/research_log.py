@@ -212,71 +212,12 @@ class ComprehensiveResearchLog:
         return list(goal_tracker.values())
 
     def review_daily_goals(self) -> None:
-        """
-        Review and update the status of today's goals, including incomplete goals from past days.
-        Ensures proper tracking of completed goals and prevents duplicate carry-overs.
-        """
         daily_summary = self._load_daily_goals()
         goals = daily_summary.get('goals', [])
         goal_status = daily_summary.get('goal_status', {})
         
-        # First, build a set of all completed goals across all days
-        completed_goals = set()
-        daily_logs_path = self.base_path / 'daily_logs'
-        
-        for log_file in daily_logs_path.glob('daily_*.json'):
-            try:
-                log_data = load_json(log_file)
-                log_status = log_data.get('goal_status', {})
-                
-                for i, goal in enumerate(log_data.get('goals', []), 1):
-                    if log_status.get(str(i), {}).get('status') == 'completed':
-                        completed_goals.add(str(goal).strip())
-            except (ValueError, json.JSONDecodeError) as e:
-                console.log(f"[yellow]Warning: Error processing {log_file}: {str(e)}[/yellow]")
-        
-        # Get incomplete goals from past days, excluding completed ones
-        past_incomplete = []
-        for goal_info in self._get_past_incomplete_goals():
-            if str(goal_info['goal']).strip() not in completed_goals:
-                past_incomplete.append(goal_info)
-        
-        if past_incomplete:
-            console.display_header("Past Incomplete Goals")
-            for i, incomplete in enumerate(past_incomplete):
-                console.info(f"Goal from {incomplete['original_date']}: {incomplete['goal']}")
-                
-                # Check if this goal is already in today's goals
-                goal_exists = any(
-                    str(g).strip() == str(incomplete['goal']).strip() 
-                    for g in goals
-                )
-                
-                if not goal_exists and console.confirm("Add this goal to today's goals?"):
-                    goals.append(incomplete['goal'])
-                    new_goal_index = len(goals)
-                    
-                    # Transfer the previous status and progress notes
-                    goal_status[str(new_goal_index)] = {
-                        'status': incomplete['status'],
-                        'progress_notes': incomplete['progress_notes'] + [{
-                            'time': datetime.now().isoformat(),
-                            'note': f"Carried over from {incomplete['original_date']}"
-                        }],
-                        'completion_time': None,
-                        'original_date': incomplete['original_date']  # Track origin date
-                    }
-        
-        if not goals:
-            console.warning("No goals set for today. Would you like to set some goals now?")
-            if console.confirm("Set goals now?"):
-                self.start_day([])
-                return
-            return
-
         console.display_header("Daily Goals Review")
         
-        # Review all goals (both new and carried over)
         for i, goal in enumerate(goals, 1):
             current_status = goal_status.get(str(i), {
                 'status': 'pending',
@@ -284,24 +225,12 @@ class ComprehensiveResearchLog:
                 'completion_time': None
             })
             
-            # Check if this goal was previously completed in any day
-            if str(goal).strip() in completed_goals:
-                console.info(f"\nGoal {i}: {goal}")
-                console.info("[yellow]Note: This goal was previously marked as completed[/yellow]")
-                continue
-            
             console.info(f"\nGoal {i}: {goal}")
-            
-            # Display goal history
-            if current_status.get('original_date'):
-                console.info(f"[yellow]Originally created on: {current_status['original_date']}[/yellow]")
-            
             console.info(f"Current Status: {current_status['status']}")
             
-            if current_status['progress_notes']:
-                console.info("Progress Notes:")
-                for note in current_status['progress_notes']:
-                    console.log(f"- {note['time']}: {note['note']}")
+            if current_status['status'] == 'completed':
+                console.info("[yellow]This goal is already completed and cannot be modified.[/yellow]")
+                continue
             
             if console.confirm("Update this goal?"):
                 new_status = console.prompt(
@@ -313,7 +242,6 @@ class ComprehensiveResearchLog:
                     current_status['status'] = new_status
                     if new_status == 'completed':
                         current_status['completion_time'] = datetime.now().isoformat()
-                        completed_goals.add(str(goal).strip())  # Add to completed set
                 
                 if console.confirm("Add a progress note?"):
                     note = console.prompt("Enter progress note")
@@ -324,41 +252,31 @@ class ComprehensiveResearchLog:
                 
                 goal_status[str(i)] = current_status
         
-        # Update daily summary with modified goals and status
         daily_summary['goals'] = goals
         daily_summary['goal_status'] = goal_status
-        
-        # Save the updated daily summary
-        save_json(
-            daily_summary, 
-            self.base_path / 'daily_logs' / f"daily_{datetime.now():%Y%m%d}.json"
-        )
-        
+        self._save_daily_summary(daily_summary)
         self._display_goals_summary(daily_summary)
 
     def _display_goals_summary(self, daily_summary: Dict[str, Any]) -> None:
-        """Display a summary of goals and their progress."""
         goals = daily_summary.get('goals', [])
         goal_status = daily_summary.get('goal_status', {})
         
         console.display_header("Goals Summary")
         
-        # Create a progress table
         table = Table(show_header=True, header_style="bold magenta")
         table.add_column("Goal")
         table.add_column("Status")
         table.add_column("Progress")
         table.add_column("Latest Update")
+        table.add_column("Notes")
         
         for i, goal in enumerate(goals, 1):
             status = goal_status.get(str(i), {'status': 'pending', 'progress_notes': []})
             
-            # Calculate progress indicators
             progress_notes = status['progress_notes']
             latest_note = progress_notes[-1]['note'] if progress_notes else "No updates"
             latest_time = format_time(datetime.fromisoformat(progress_notes[-1]['time'])) if progress_notes else "-"
             
-            # Add row with appropriate styling
             status_style = {
                 'pending': 'yellow',
                 'in_progress': 'blue',
@@ -366,16 +284,22 @@ class ComprehensiveResearchLog:
                 'blocked': 'red'
             }.get(status['status'], 'white')
             
+            # Highlight overdue goals
+            if status.get('original_date'):
+                original_date = datetime.fromisoformat(status['original_date']).date()
+                if original_date < datetime.now().date():
+                    latest_note = f"[red]Overdue since {original_date}[/red] " + latest_note
+            
             table.add_row(
                 goal,
                 Text(status['status'], style=status_style),
                 latest_note,
-                latest_time
+                latest_time,
+                "\n".join([note['note'] for note in progress_notes])
             )
         
         console.log(table)
         
-        # Show completion statistics
         completed = sum(1 for s in goal_status.values() if s['status'] == 'completed')
         total = len(goals)
         completion_rate = (completed / total * 100) if total > 0 else 0
