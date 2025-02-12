@@ -157,7 +157,7 @@ class ComprehensiveResearchLog:
         today = datetime.now().date()
         
         # First pass: identify all completed goals
-        for log_file in daily_logs_path.glob('daily_*.json'):
+        for log_file in sorted(daily_logs_path.glob('daily_*.json')):
             try:
                 file_date = datetime.strptime(log_file.stem[6:], '%Y%m%d').date()
                 if file_date >= today:
@@ -188,9 +188,9 @@ class ComprehensiveResearchLog:
                 goals = daily_summary.get('goals', [])
                 goal_status = daily_summary.get('goal_status', {})
                 
-                for i, goal in enumerate(goals, 1):
+                for goal, goal_status in zip(goals, goal_status.values()):
                     goal_text = str(goal).strip()
-                    status = goal_status.get(str(i), {}).get('status', 'pending')
+                    status = goal_status.get('status', 'pending')
                     
                     # Skip if goal was ever completed
                     if goal_text in completed_goals:
@@ -203,7 +203,7 @@ class ComprehensiveResearchLog:
                             'goal': goal,
                             'original_date': file_date.isoformat(),
                             'status': status,
-                            'progress_notes': goal_status.get(str(i), {}).get('progress_notes', [])
+                            'progress_notes': goal_status.get('progress_notes', [])
                         }
                         
             except (ValueError, json.JSONDecodeError) as e:
@@ -215,7 +215,59 @@ class ComprehensiveResearchLog:
         daily_summary = self._load_daily_goals()
         goals = daily_summary.get('goals', [])
         goal_status = daily_summary.get('goal_status', {})
+        completed_goals = set()
+        daily_logs_path = self.base_path / 'daily_logs'
         
+        for log_file in daily_logs_path.glob('daily_*.json'):
+            try:
+                log_data = load_json(log_file)
+                log_status = log_data.get('goal_status', {})
+                
+                for i, goal in enumerate(log_data.get('goals', []), 1):
+                    if log_status.get(str(i), {}).get('status') == 'completed':
+                        completed_goals.add(str(goal).strip())
+            except (ValueError, json.JSONDecodeError) as e:
+                console.log(f"[yellow]Warning: Error processing {log_file}: {str(e)}[/yellow]")
+        
+        # Get incomplete goals from past days, excluding completed ones
+        past_incomplete = []
+        for goal_info in self._get_past_incomplete_goals():
+            if str(goal_info['goal']).strip() not in completed_goals:
+                past_incomplete.append(goal_info)
+        
+        if past_incomplete:
+            console.display_header("Past Incomplete Goals")
+            for i, incomplete in enumerate(past_incomplete):
+                
+                # Check if this goal is already in today's goals
+                goal_exists = any(
+                    str(g).strip() == str(incomplete['goal']).strip() 
+                    for g in goals
+                )
+                if not goal_exists:
+                    console.info(f"Goal from {incomplete['original_date']}: {incomplete['goal']}")
+                
+                if not goal_exists and console.confirm("Add this goal to today's goals?"):
+                    goals.append(incomplete['goal'])
+                    new_goal_index = len(goals)
+                    
+                    # Transfer the previous status and progress notes
+                    goal_status[str(new_goal_index)] = {
+                        'status': incomplete['status'],
+                        'progress_notes': incomplete['progress_notes'] + [{
+                            'time': datetime.now().isoformat(),
+                            'note': f"Carried over from {incomplete['original_date']}"
+                        }],
+                        'completion_time': None,
+                        'original_date': incomplete['original_date']  # Track origin date
+                    }
+        
+        if not goals:
+            console.warning("No goals set for today. Would you like to set some goals now?")
+            if console.confirm("Set goals now?"):
+                self.start_day([])
+                return
+            return
         console.display_header("Daily Goals Review")
         
         for i, goal in enumerate(goals, 1):
@@ -313,52 +365,31 @@ class ComprehensiveResearchLog:
         This method checks for an existing daily summary and merges new goals with any
         existing data to maintain continuity throughout the day.
         """
-        today = datetime.now()
-        daily_log_path = self.base_path / 'daily_logs' / f"daily_{today:%Y%m%d}.json"
+
+        existing_summary = self._load_daily_goals()
         
-        # If a daily summary exists, load it first
-        if daily_log_path.exists():
-            existing_summary = load_json(daily_log_path)
-            
-            # Preserve existing data while adding new goals
-            summary = {
-                'date': existing_summary.get('date', today.isoformat()),
-                'goals': list(set(existing_summary.get('goals', []) + goals)),
-                'completed_tasks': existing_summary.get('completed_tasks', []),
-                'insights': existing_summary.get('insights', []),
-                'next_day_todos': existing_summary.get('next_day_todos', []),
-                'goal_status': existing_summary.get('goal_status', {})
-            }
-            
-            # Initialize status for new goals
-            current_goal_count = len(existing_summary.get('goals', []))
-            for i, goal in enumerate(goals, current_goal_count + 1):
-                if str(i) not in summary['goal_status']:
-                    summary['goal_status'][str(i)] = {
-                        'status': 'pending',
-                        'progress_notes': [{
-                            'time': datetime.now().isoformat(),
-                            'note': 'Goal added during day'
-                        }],
-                        'completion_time': None
-                    }
-        else:
-            # Create new summary if no existing file
-            summary = {
-                'date': today.isoformat(),
-                'goals': goals,
-                'completed_tasks': [],
-                'insights': [],
-                'next_day_todos': [],
-                'goal_status': {
-                    str(i): {
-                        'status': 'pending',
-                        'progress_notes': [],
-                        'completion_time': None
-                    }
-                    for i, _ in enumerate(goals, 1)
+        # Preserve existing data while adding new goals
+        summary = {
+            'date': existing_summary['date'],
+            'goals': existing_summary.get('goals', []) + goals,
+            'completed_tasks': existing_summary.get('completed_tasks', []),
+            'insights': existing_summary.get('insights', []),
+            'next_day_todos': existing_summary.get('next_day_todos', []),
+            'goal_status': existing_summary.get('goal_status', {})
+        }
+        
+        # Initialize status for new goals
+
+        for i, goal in enumerate(summary['goals'], 1):
+            if str(i) not in summary['goal_status']:
+                summary['goal_status'][str(i)] = {
+                    'status': 'pending',
+                    'progress_notes': [{
+                        'time': datetime.now().isoformat(),
+                        'note': 'Goal added during day'
+                    }],
+                    'completion_time': None
                 }
-            }
         
         # Update in-memory state
         self.daily_summaries.append(summary)
